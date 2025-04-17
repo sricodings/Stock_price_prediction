@@ -10,19 +10,16 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 from datetime import datetime, timedelta
 from streamlit_option_menu import option_menu
-import requests
-from bs4 import BeautifulSoup
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 import time
+from alpha_vantage.timeseries import TimeSeries
 
-
+API_KEY = 'FLW3NNN8X5A2W7JL'
+ts = TimeSeries(key=API_KEY, output_format='pandas')
 
 def create_tables():
     conn = sqlite3.connect('app.db')
     c = conn.cursor()
-    
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,7 +28,7 @@ def create_tables():
             role TEXT NOT NULL
         )
     ''')
-    
+
     c.execute('''
         CREATE TABLE IF NOT EXISTS feedback (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -50,7 +47,7 @@ def register_user(username, password, role='user'):
     conn = sqlite3.connect('app.db')
     c = conn.cursor()
     hashed_password = hash_password(password)
-    
+
     try:
         c.execute("INSERT INTO users (username, password, role) VALUES (?, ?, ?)", (username, hashed_password, role))
         conn.commit()
@@ -91,7 +88,7 @@ def prepare_data(data):
     for i in range(60, len(scaled_data)):
         X.append(scaled_data[i-60:i, 0])
         y.append(scaled_data[i, 0])
-    
+
     X, y = np.array(X), np.array(y)
     return X, y, scaler
 
@@ -103,318 +100,256 @@ def create_lstm_model(X_train):
     model.compile(optimizer='adam', loss='mean_squared_error')
     return model
 
+
+def plot_stock_chart(data, future_predictions_df, ticker):
+    # Check if the 'Date' column is in datetime format and if not, convert it
+    if 'Date' in data.columns:
+        data['Date'] = pd.to_datetime(data['Date'])
+        data.set_index('Date', inplace=True)
+
+    # Select Chart Type
+    chart_type = st.radio("Select Chart Type", ("Line Chart", "Candlestick Chart"))
+
+    # Line Chart
+    if chart_type == "Line Chart":
+        trace1 = go.Scatter(
+            x=data.index,
+            y=data['Open'],
+            mode='lines',
+            name='Open Price'
+        )
+
+        trace2 = go.Scatter(
+            x=data.index,
+            y=data['7-day MA'] if '7-day MA' in data.columns else pd.Series([np.nan] * len(data)),
+            mode='lines',
+            name='7-Day Moving Average'
+        )
+
+        trace3 = go.Scatter(
+            x=future_predictions_df['Date'],
+            y=future_predictions_df['Predicted Price'],
+            mode='lines',
+            name='Future Predictions',
+            line=dict(color='red', width=2)
+        )
+
+        layout = go.Layout(
+            title=f'{ticker} Price Prediction',
+            xaxis=dict(title='Date'),
+            yaxis=dict(title='Open Price (USD)', fixedrange=False),
+            template='plotly_dark',
+            width=1400,
+            height=700
+        )
+
+        fig = go.Figure(data=[trace1, trace2, trace3], layout=layout)
+
+    # Candlestick Chart
+    else:
+
+        candlestick = go.Candlestick(
+            x=data.index,
+            open=data['Open'],
+            high=data['High'],
+            low=data['Low'],
+            close=data['Close'],
+            name='Candlestick'
+        )
+
+        trace_pred = go.Scatter(
+            x=future_predictions_df['Date'],
+            y=future_predictions_df['Predicted Price'],
+            mode='lines',
+            name='Future Predictions',
+            line=dict(color='red', width=2)
+        )
+
+        layout = go.Layout(
+            title=f'{ticker} Candlestick Chart & Predictions',
+            xaxis=dict(title='Date'),
+            yaxis=dict(title='Price (USD)', fixedrange=False),
+            template='plotly_dark',
+            width=1400,
+            height=700
+        )
+
+        fig = go.Figure(data=[candlestick, trace_pred], layout=layout)
+
+    st.plotly_chart(fig)
+
+
+def fetch_data_alpha_vantage(ticker, interval='60min', outputsize='compact', retries=5, delay=5):
+    ts = TimeSeries(key=API_KEY, output_format='pandas')
+
+    for attempt in range(retries):
+        try:
+            st.info(f"Trying Alpha Vantage interval='{interval}', outputsize='{outputsize}' (Attempt {attempt + 1})")
+            data, _ = ts.get_intraday(symbol=ticker, interval=interval, outputsize=outputsize)
+            if data.empty:
+                raise ValueError("Empty DataFrame returned.")
+            
+            data = data.rename(columns={
+                '1. open': 'Open',
+                '2. high': 'High',
+                '3. low': 'Low',
+                '4. close': 'Close',
+                '5. volume': 'Volume'
+            })
+            data.index = pd.to_datetime(data.index)
+            data.sort_index(inplace=True)
+            st.success("Successfully fetched data from Alpha Vantage")
+            return data
+        except Exception as e:
+            st.warning(f"Attempt {attempt + 1} failed: {e}")
+            time.sleep(delay * (attempt + 1))
+    
+    st.error("Failed to fetch data from Alpha Vantage after multiple attempts.")
+    return pd.DataFrame()
+
+# === Updated LSTM-based Prediction Page using Alpha Vantage ===
 def prediction_page(asset_type, ticker):
-    st.subheader(f"{asset_type} Price Prediction")
-
-    period = st.selectbox(
-        "Select period for data download:",
-        ['1d', '5d', '1mo', '3mo', '6mo', '1y', '2y', '5y', '10y', 'ytd', 'max']
-    )
-
-    interval = st.selectbox(
-        "Select data interval:",
-        ['1m', '2m', '5m', '15m', '30m', '60m', '90m', '1h', '1d', '5d', '1wk', '1mo', '3mo']
-    )
     with st.spinner(f"Fetching data for {ticker}..."):
-        data = yf.download(tickers=ticker, period=period, interval=interval)
+        data = fetch_data_alpha_vantage(ticker)
 
         if data.empty:
             st.write("No data found.")
-        else:
-            data['7-day MA'] = data['Open'].rolling(window=7*24).mean()
+            return
 
-            X, y, scaler = prepare_data(data)
-            X_train = np.reshape(X, (X.shape[0], X.shape[1], 1))
+        # Optional: adjust window size depending on interval
+        data['7-day MA'] = data['Open'].rolling(window=7 * 24).mean()
 
-            model = create_lstm_model(X_train)
-            model.fit(X_train, y, epochs=10, batch_size=32, verbose=1)
+        X, y, scaler = prepare_data(data)
+        X_train = np.reshape(X, (X.shape[0], X.shape[1], 1))
 
-            user_input_date = st.date_input("Enter the prediction date", value=pd.to_datetime('today'))
-            prediction_date = pd.to_datetime(user_input_date)
-            last_date = data.index[-1].to_pydatetime().replace(tzinfo=None)
+        model = create_lstm_model(X_train)
+        model.fit(X_train, y, epochs=10, batch_size=32, verbose=1)
 
-            hours_until_prediction = int((prediction_date - last_date).total_seconds() // 3600)
+        user_input_date = st.date_input("Enter the prediction date", value=pd.to_datetime('today'))
+        prediction_date = pd.to_datetime(user_input_date)
+        last_date = data.index[-1].to_pydatetime().replace(tzinfo=None)
 
-            if hours_until_prediction < 0:
-                st.write("The prediction date is in the past. Please enter a future date.")
-            else:
-                last_60_hours = data['Open'].values[-60:].reshape(-1, 1)
-                last_60_hours_scaled = scaler.transform(last_60_hours)
-                last_60_hours_scaled = np.reshape(last_60_hours_scaled, (1, last_60_hours_scaled.shape[0], 1))
+        hours_until_prediction = int((prediction_date - last_date).total_seconds() // 3600)
 
-                future_dates = [last_date + timedelta(hours=i) for i in range(1, hours_until_prediction + 1)]
-                future_predictions = []
+        if hours_until_prediction < 0:
+            st.write("The prediction date is in the past. Please enter a future date.")
+            return
 
-                for _ in range(hours_until_prediction):
-                    predicted_price_scaled = model.predict(last_60_hours_scaled)
-                    predicted_price = scaler.inverse_transform(predicted_price_scaled)[0, 0]
-                    future_predictions.append(predicted_price)
+        last_60_hours = data['Open'].values[-60:].reshape(-1, 1)
+        last_60_hours_scaled = scaler.transform(last_60_hours)
+        last_60_hours_scaled = np.reshape(last_60_hours_scaled, (1, last_60_hours_scaled.shape[0], 1))
 
-                    last_60_hours = np.append(last_60_hours[1:], [[predicted_price]], axis=0)
-                    last_60_hours_scaled = scaler.transform(last_60_hours)
-                    last_60_hours_scaled = np.reshape(last_60_hours_scaled, (1, last_60_hours_scaled.shape[0], 1))
+        future_dates = [last_date + timedelta(hours=i) for i in range(1, hours_until_prediction + 1)]
+        future_predictions = []
 
-                future_predictions_df = pd.DataFrame({
-                    'Date': future_dates,
-                    'Predicted Price': future_predictions
-                })
+        for _ in range(hours_until_prediction):
+            predicted_price_scaled = model.predict(last_60_hours_scaled)
+            predicted_price = scaler.inverse_transform(predicted_price_scaled)[0, 0]
+            future_predictions.append(predicted_price)
 
-                selected_predicted_price = future_predictions_df.iloc[-1]['Predicted Price']
-                last_known_price = data['Open'].iloc[-1]
-                advice = "Buy" if selected_predicted_price > last_known_price else "Sell"
+            last_60_hours = np.append(last_60_hours[1:], [[predicted_price]], axis=0)
+            last_60_hours_scaled = scaler.transform(last_60_hours)
+            last_60_hours_scaled = np.reshape(last_60_hours_scaled, (1, last_60_hours_scaled.shape[0], 1))
 
-                st.write(f"Predicted price for {prediction_date.date()}: ${selected_predicted_price:.2f}")
-                st.write(f"Current price: ${last_known_price:.2f}")
-                st.write(f"Advice: {advice}")
+        future_predictions_df = pd.DataFrame({
+            'Date': future_dates,
+            'Predicted Price': future_predictions
+        })
 
-                chart_type = st.radio("Select Chart Type", ("Line Chart", "Candlestick Chart"))
+        selected_predicted_price = future_predictions_df.iloc[-1]['Predicted Price']
+        last_known_price = data['Open'].iloc[-1]
 
-                if chart_type == "Line Chart":
-                    trace1 = go.Scatter(
-                        x=data.index,
-                        y=data['Open'],
-                        mode='lines',
-                        name='Open Price'
-                    )
+        advice = "Buy" if selected_predicted_price > last_known_price else "Sell"
 
-                    trace2 = go.Scatter(
-                        x=data.index,
-                        y=data['7-day MA'] if '7-day MA' in data.columns else pd.Series([np.nan] * len(data)),
-                        mode='lines',
-                        name='7-Day Moving Average'
-                    )
+        st.write(f"Predicted price for {prediction_date.date()}: ${selected_predicted_price:.2f}")
+        st.write(f"Current price: ${last_known_price:.2f}")
+        st.write(f"Advice: {advice}")
 
-                    trace3 = go.Scatter(
-                        x=future_predictions_df['Date'],
-                        y=future_predictions_df['Predicted Price'],
-                        mode='lines',
-                        name='Future Predictions',
-                        line=dict(color='red', width=2)
-                    )
+        plot_stock_chart(data, future_predictions_df, ticker)
 
-                    layout = go.Layout(
-                        title=f'{ticker} Price Prediction',
-                        xaxis=dict(title='Date'),
-                        yaxis=dict(title='Open Price (USD)', fixedrange=False),
-                        template='plotly_dark',
-                        width=1400,
-                        height=700
-                    )
-
-                    fig = go.Figure(data=[trace1, trace2, trace3], layout=layout)
-
-
-                else:
-                    candlestick = go.Candlestick(
-                        x=data.index,
-                        open=data['Open'],
-                        high=data['High'],
-                        low=data['Low'],
-                        close=data['Close'],
-                        name='Candlestick'
-                    )
-
-                    trace_pred = go.Scatter(
-                        x=future_predictions_df['Date'],
-                        y=future_predictions_df['Predicted Price'],
-                        mode='lines',
-                        name='Future Predictions',
-                        line=dict(color='red', width=2)
-                    )
-
-                    layout = go.Layout(
-                        title=f'{ticker} Candlestick Chart & Predictions',
-                        xaxis=dict(title='Date'),
-                        yaxis=dict(title='Price (USD)', fixedrange=False),
-                        template='plotly_dark',
-                        width=1400,
-                        height=700
-                    )
-
-                    fig = go.Figure(data=[candlestick, trace_pred], layout=layout)
-
-
-                st.plotly_chart(fig)
 
 def require_login(func):
     def wrapper(*args, **kwargs):
         if 'logged_in' not in st.session_state or not st.session_state['logged_in']:
             st.warning("Please log in to access this page.")
-            st.stop()
+            return
         return func(*args, **kwargs)
     return wrapper
 
-def admin_login():
-    st.subheader("Admin Login")
-    username = st.text_input("Username", help="Enter your admin username.")
-    password = st.text_input("Password", type="password", help="Enter your admin password.")
-    if st.button("Login"):
-        if check_user_credentials(username, password):
-            user = check_user_credentials(username, password)
-            if user and user[3] == 'admin':
-                st.session_state['admin_logged_in'] = True
-                st.success("Admin logged in successfully!")
-            else:
-                st.error("Invalid admin credentials or insufficient privileges.")
-        else:
-            st.error("Invalid credentials.")
-
-@require_login
-def admin_page():
-    st.subheader("Admin Dashboard")
-    
-    if 'admin_logged_in' in st.session_state and st.session_state['admin_logged_in']:
-        st.write("Welcome, Admin!")
-        feedback = get_feedback()
-        
-        if feedback:
-            st.subheader("User Feedback")
-            for fb in feedback:
-                st.write(f"User: {fb[1]} - Feedback: {fb[2]}")
-        else:
-            st.write("No feedback available.")
-    else:
-        st.warning("You need to be an admin to access this page.")
-
-def feedback_page():
-    st.subheader("User Feedback")
-    username = st.text_input("Username", help="Enter your username.")
-    feedback = st.text_area("Feedback", help="Provide your feedback here.")
-    if st.button("Submit Feedback"):
-        if username and feedback:
-            save_feedback(username, feedback)
-            st.success("Feedback submitted successfully!")
-        else:
-            st.error("Please enter both username and feedback.")
-
-
-def fetch_dynamic_news_content(urls):
-    content_list = []
-    try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-
-        for url in urls:
-            driver.get(url)
-            time.sleep(5)
-            
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            content_items = soup.find_all('div', class_='news-analysis-v2_content__z0iLP w-full text-xs sm:flex-1')
-            
-            for item in content_items:
-                title_tag = item.find('a')
-                if title_tag:
-                    title = title_tag.text.strip()
-                    link = title_tag['href']
-                    if not link.startswith('http'):
-                        link = 'https://www.investing.com' + link
-                    content_list.append({'title': title, 'link': link})
-        
-        driver.quit()
-        
-    except Exception as e:
-        st.error(f"Error fetching content: {e}")
-    
-    return content_list
-
-def display_news_content(news_content):
-    st.subheader("Latest Financial News")
-    
-    if news_content:
-        current_section = ""
-        for item in news_content:
-            title = item['title']
-            link = item['link']
-            
-            st.markdown(f"""
-                <div style="border: 1px solid #ddd; padding: 15px; border-radius: 10px; margin-bottom: 15px; background-color: #f9f9f9;">
-                    <h3 style="color: #2b8a3e;">{title}</h3>
-                    <a href="{link}" style="text-decoration: none; color: #1a73e8; font-weight: bold;" target="_blank">Read more</a>
-                </div>
-            """, unsafe_allow_html=True)
-    else:
-        st.write("No content found.")
-
-def content_page():
-    urls = [
-        'https://www.investing.com/news/stock-market-news',
-        'https://www.investing.com/news/cryptocurrency-news',
-        'https://www.investing.com/news/forex-news'
-    ]
-    news_content = fetch_dynamic_news_content(urls)
-    display_news_content(news_content)
-
 def main():
+    st.set_page_config(page_title="Stock Prediction", page_icon="📈", layout="wide")
+
     create_tables()
 
-    if 'logged_in' not in st.session_state:
-        st.session_state['logged_in'] = False
-
-    if 'admin_logged_in' not in st.session_state:
-        st.session_state['admin_logged_in'] = False
-
-    with st.sidebar:
-        selected = option_menu(
-        menu_title=None,
-        options=["Home", "Forex", "Stocks", "Coins", "News", "Register", "Login", "Feedback", "Admin"],
-        icons=["house", "currency-exchange", "bar-chart", "coin", "newspaper", "person-plus", "person", "envelope", "shield"],
-        menu_icon="cast",
-        default_index=0
-    )
+    selected = option_menu(None, ["Home", "Login", "Register", "Prediction", "Feedback"], 
+                           icons=["house", "person", "key", "bar-chart-line", "envelope"], 
+                           menu_icon="cast", default_index=0, orientation="horizontal")
 
     if selected == "Home":
-        st.write("Welcome to the Financial Prediction App!")
-
-    elif selected == "Forex":
-        if st.session_state['logged_in']:
-            forex_ticker = st.selectbox("Select Forex Pair", ['EURUSD=X', 'GBPUSD=X', 'USDJPY=X'])
-            prediction_page('Forex', forex_ticker)
-        else:
-            st.warning("Please log in to access this page.")
-
-    elif selected == "Stocks":
-        if st.session_state['logged_in']:
-            stock_ticker = st.selectbox("Select Stock", ['AAPL', 'GOOGL', 'MSFT'])
-            prediction_page('Stocks', stock_ticker)
-        else:
-            st.warning("Please log in to access this page.")
-
-    elif selected == "Coins":
-        if st.session_state['logged_in']:
-            coin_ticker = st.selectbox("Select Coin", ['BTC-USD', 'ETH-USD', 'LTC-USD','BNB-USD', 'SOL-USD', 'AVAX-USD', 'NEAR-USD', 'APT-USD'])
-            prediction_page('Coins', coin_ticker)
-        else:
-            st.warning("Please log in to access this page.")
-
-    elif selected == "News":
-        content_page()
-
-    elif selected == "Register":
-        st.subheader("Register")
-        username = st.text_input("Username", help="Enter your desired username.")
-        password = st.text_input("Password", type="password", help="Choose a strong password.")
-        role = "user"
-        if st.button("Register"):
-            register_user(username, password, role)
+        st.write("# Welcome to Stock Prediction App")
+        
 
     elif selected == "Login":
-        st.subheader("Login")
-        username = st.text_input("Username", help="Enter your username.")
-        password = st.text_input("Password", type="password", help="Enter your password.")
-        if st.button("Login"):
-            if check_user_credentials(username, password):
-                st.session_state['logged_in'] = True
-                st.success("You are logged in!")
-            else:
-                st.error("Invalid credentials, please try again.")
+        login_page()
+
+    elif selected == "Register":
+        register_page()
+
+    elif selected == "Prediction":
+        # Asset Type Selection
+        asset_type = st.selectbox(
+            "Select Asset Type",
+            ["Stock", "Cryptocurrency", "Commodities"],
+            index=0
+        )
+
+        # Provide ticker based on the selected asset type
+        if asset_type == "Stock":
+            ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, TSLA)").upper()
+        elif asset_type == "Cryptocurrency":
+            ticker = st.text_input("Enter Cryptocurrency Ticker (e.g., BTC-USD, ETH-USD)").upper()
+        elif asset_type == "Commodities":
+            ticker = st.text_input("Enter Commodities Ticker (e.g., GOLD, OIL)").upper()
+
+        if ticker:
+            require_login(prediction_page)(asset_type=asset_type, ticker=ticker)
 
     elif selected == "Feedback":
         feedback_page()
+    
 
-    elif selected == "Admin":
-        if st.session_state['admin_logged_in']:
-            admin_page()
+
+def login_page():
+    st.write("# Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Login"):
+        user = check_user_credentials(username, password)
+        if user:
+            st.session_state['logged_in'] = True
+            st.session_state['username'] = username
+            st.success(f"Welcome back, {username}!")
         else:
-            admin_login()
+            st.error("Invalid .")
+
+def register_page():
+    st.write("# Register")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    role = st.selectbox("Role", ['user', 'admin'])
+    if st.button("Register"):
+        register_user(username, password, role)
+
+def feedback_page():
+    st.write("# Feedback")
+    if 'logged_in' not in st.session_state or not st.session_state['logged_in']:
+        st.warning("You need to log in to provide feedback.")
+        return
+    feedback_text = st.text_area("Your Feedback")
+    if st.button("Submit Feedback"):
+        save_feedback(st.session_state['username'], feedback_text)
+        st.success("Feedback submitted successfully!")
+    
 
 if __name__ == "__main__":
     main()
