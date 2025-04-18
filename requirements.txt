@@ -8,4 +8,4 @@ tensorflow
 plotly
 streamlit-option-menu
 selenium
-webdriver
+
