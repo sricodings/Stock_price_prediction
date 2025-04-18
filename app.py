@@ -12,6 +12,9 @@ from datetime import datetime, timedelta
 from streamlit_option_menu import option_menu
 import time
 from alpha_vantage.timeseries import TimeSeries
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
 
 API_KEY = 'FLW3NNN8X5A2W7JL'
 ts = TimeSeries(key=API_KEY, output_format='pandas')
@@ -281,10 +284,14 @@ def main():
 
     create_tables()
 
-    selected = option_menu(None, ["Home", "Login", "Register", "Prediction", "Feedback"], 
-                           icons=["house", "person", "key", "bar-chart-line", "envelope"], 
-                           menu_icon="cast", default_index=0, orientation="horizontal")
-
+    with st.sidebar:
+        selected = option_menu(
+        menu_title=None,
+        options=["Home", "News", "Register", "Login", "Feedback", "Admin"],
+        icons=["house", "newspaper","person-plus", "person", "envelope", "shield"],
+        menu_icon="cast",
+        default_index=0
+    )
     if selected == "Home":
         st.write("# Welcome to Stock Prediction App")
         
@@ -294,6 +301,8 @@ def main():
 
     elif selected == "Register":
         register_page()
+    elif selected == "News":
+        content_page()
 
     elif selected == "Prediction":
         # Asset Type Selection
@@ -317,7 +326,60 @@ def main():
     elif selected == "Feedback":
         feedback_page()
     
+def fetch_dynamic_news_content(urls):
+    content_list = []
+    try:
+        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
 
+        for url in urls:
+            driver.get(url)
+            time.sleep(5)
+            
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            content_items = soup.find_all('div', class_='news-analysis-v2_content__z0iLP w-full text-xs sm:flex-1')
+            
+            for item in content_items:
+                title_tag = item.find('a')
+                if title_tag:
+                    title = title_tag.text.strip()
+                    link = title_tag['href']
+                    if not link.startswith('http'):
+                        link = 'https://www.investing.com' + link
+                    content_list.append({'title': title, 'link': link})
+        
+        driver.quit()
+        
+    except Exception as e:
+        st.error(f"Error fetching content: {e}")
+    
+    return content_list
+
+def display_news_content(news_content):
+    st.subheader("Latest Financial News")
+    
+    if news_content:
+        current_section = ""
+        for item in news_content:
+            title = item['title']
+            link = item['link']
+            
+            st.markdown(f"""
+                <div style="border: 1px solid #ddd; padding: 15px; border-radius: 10px; margin-bottom: 15px; background-color: #f9f9f9;">
+                    <h3 style="color: #2b8a3e;">{title}</h3>
+                    <a href="{link}" style="text-decoration: none; color: #1a73e8; font-weight: bold;" target="_blank">Read more</a>
+                </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.write("No content found.")
+
+def content_page():
+    urls = [
+        'https://www.investing.com/news/stock-market-news',
+        'https://www.investing.com/news/cryptocurrency-news',
+        'https://www.investing.com/news/forex-news'
+    ]
+    news_content = fetch_dynamic_news_content(urls)
+    display_news_content(news_content)
 
 def login_page():
     st.write("# Login")
