@@ -9,3 +9,4 @@ plotly
 streamlit-option-menu
 selenium
 alpha_vantage
+webdriver-manager
