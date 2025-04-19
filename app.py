@@ -15,6 +15,7 @@ from alpha_vantage.timeseries import TimeSeries
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
+from bs4 import BeautifulSoup
 
 API_KEY = 'FLW3NNN8X5A2W7JL'
 ts = TimeSeries(key=API_KEY, output_format='pandas')
@@ -105,15 +106,13 @@ def create_lstm_model(X_train):
 
 
 def plot_stock_chart(data, future_predictions_df, ticker):
-    # Check if the 'Date' column is in datetime format and if not, convert it
+
     if 'Date' in data.columns:
         data['Date'] = pd.to_datetime(data['Date'])
         data.set_index('Date', inplace=True)
 
-    # Select Chart Type
     chart_type = st.radio("Select Chart Type", ("Line Chart", "Candlestick Chart"))
 
-    # Line Chart
     if chart_type == "Line Chart":
         trace1 = go.Scatter(
             x=data.index,
@@ -148,7 +147,7 @@ def plot_stock_chart(data, future_predictions_df, ticker):
 
         fig = go.Figure(data=[trace1, trace2, trace3], layout=layout)
 
-    # Candlestick Chart
+
     else:
 
         candlestick = go.Candlestick(
@@ -210,7 +209,6 @@ def fetch_data_alpha_vantage(ticker, interval='60min', outputsize='compact', ret
     st.error("Failed to fetch data from Alpha Vantage after multiple attempts.")
     return pd.DataFrame()
 
-# === Updated LSTM-based Prediction Page using Alpha Vantage ===
 def prediction_page(asset_type, ticker):
     with st.spinner(f"Fetching data for {ticker}..."):
         data = fetch_data_alpha_vantage(ticker)
@@ -219,7 +217,6 @@ def prediction_page(asset_type, ticker):
             st.write("No data found.")
             return
 
-        # Optional: adjust window size depending on interval
         data['7-day MA'] = data['Open'].rolling(window=7 * 24).mean()
 
         X, y, scaler = prepare_data(data)
@@ -278,17 +275,52 @@ def require_login(func):
             return
         return func(*args, **kwargs)
     return wrapper
+def admin_login():
+    st.subheader("Admin Login")
+    username = st.text_input("Username", help="Enter your admin username.")
+    password = st.text_input("Password", type="password", help="Enter your admin password.")
+    if st.button("Login"):
+        if check_user_credentials(username, password):
+            user = check_user_credentials(username, password)
+            if user and user[3] == 'admin':
+                st.session_state['admin_logged_in'] = True
+                st.success("Admin logged in successfully!")
+            else:
+                st.error("Invalid admin credentials or insufficient privileges.")
+        else:
+            st.error("Invalid credentials.")
 
+@require_login
+def admin_page():
+    st.subheader("Admin Dashboard")
+    
+    if 'admin_logged_in' in st.session_state and st.session_state['admin_logged_in']:
+        st.write("Welcome, Admin!")
+        feedback = get_feedback()
+        
+        if feedback:
+            st.subheader("User Feedback")
+            for fb in feedback:
+                st.write(f"User: {fb[1]} - Feedback: {fb[2]}")
+        else:
+            st.write("No feedback available.")
+    else:
+        st.warning("You need to be an admin to access this page.")
 def main():
     st.set_page_config(page_title="Stock Prediction", page_icon="📈", layout="wide")
 
     create_tables()
+    if 'logged_in' not in st.session_state:
+        st.session_state['logged_in'] = False
+
+    if 'admin_logged_in' not in st.session_state:
+        st.session_state['admin_logged_in'] = False
 
     with st.sidebar:
         selected = option_menu(
         menu_title=None,
-        options=["Home", "News", "Register", "Login", "Feedback", "Admin"],
-        icons=["house", "newspaper","person-plus", "person", "envelope", "shield"],
+        options=["Home", "News", "Predict","Register", "Login", "Feedback", "Admin"],
+        icons=["house", "newspaper","bar-chart-line","person-plus", "person", "envelope", "shield"],
         menu_icon="cast",
         default_index=0
     )
@@ -303,16 +335,20 @@ def main():
         register_page()
     elif selected == "News":
         content_page()
+    elif selected == "Admin":
+        if st.session_state['admin_logged_in']:
+            admin_page()
+        else:
+            admin_login()
 
-    elif selected == "Prediction":
-        # Asset Type Selection
+    elif selected == "Predict":
+
         asset_type = st.selectbox(
             "Select Asset Type",
             ["Stock", "Cryptocurrency", "Commodities"],
             index=0
         )
 
-        # Provide ticker based on the selected asset type
         if asset_type == "Stock":
             ticker = st.text_input("Enter Stock Ticker (e.g., AAPL, TSLA)").upper()
         elif asset_type == "Cryptocurrency":
