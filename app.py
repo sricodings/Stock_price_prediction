@@ -16,6 +16,7 @@ from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from webdriver_manager.chrome import ChromeDriverManager
 from bs4 import BeautifulSoup
+import feedparser
 
 API_KEY = 'FLW3NNN8X5A2W7JL'
 ts = TimeSeries(key=API_KEY, output_format='pandas')
@@ -365,56 +366,42 @@ def main():
 def fetch_dynamic_news_content(urls):
     content_list = []
     try:
-        driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()))
-
         for url in urls:
-            driver.get(url)
-            time.sleep(5)
-            
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            content_items = soup.find_all('div', class_='news-analysis-v2_content__z0iLP w-full text-xs sm:flex-1')
-            
-            for item in content_items:
-                title_tag = item.find('a')
-                if title_tag:
-                    title = title_tag.text.strip()
-                    link = title_tag['href']
-                    if not link.startswith('http'):
-                        link = 'https://www.investing.com' + link
-                    content_list.append({'title': title, 'link': link})
-        
-        driver.quit()
-        
+            feed = feedparser.parse(url)
+            for entry in feed.entries[:10]:  # Limit to top 10 per category
+                content_list.append({
+                    'title': entry.title,
+                    'link': entry.link
+                })
     except Exception as e:
         st.error(f"Error fetching content: {e}")
     
     return content_list
 
 def display_news_content(news_content):
-    st.subheader("Latest Financial News")
+    st.subheader("📰 Latest Financial News")
     
     if news_content:
-        current_section = ""
         for item in news_content:
             title = item['title']
             link = item['link']
             
             st.markdown(f"""
                 <div style="border: 1px solid #ddd; padding: 15px; border-radius: 10px; margin-bottom: 15px; background-color: #f9f9f9;">
-                    <h3 style="color: #2b8a3e;">{title}</h3>
+                    <h4 style="color: #2b8a3e;">{title}</h4>
                     <a href="{link}" style="text-decoration: none; color: #1a73e8; font-weight: bold;" target="_blank">Read more</a>
                 </div>
             """, unsafe_allow_html=True)
     else:
-        st.write("No content found.")
+        st.write("⚠️ No news content found.")
 
 def content_page():
-    urls = [
-        'https://www.investing.com/news/stock-market-news',
-        'https://www.investing.com/news/cryptocurrency-news',
-        'https://www.investing.com/news/forex-news'
+    rss_urls = [
+        'https://www.investing.com/rss/news_285.rss', 
+        'https://www.investing.com/rss/news_301.rss',
+        'https://www.investing.com/rss/news_95.rss'  
     ]
-    news_content = fetch_dynamic_news_content(urls)
+    news_content = fetch_dynamic_news_content(rss_urls)
     display_news_content(news_content)
 
 def login_page():
